@@ -1,0 +1,15 @@
+{
+  "name": "portfoy-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "cd web && npm install && npm run build",
+    "start": "node server/index.js",
+    "postinstall": "echo 'Kök bağımlılıkları kuruldu. Build için: npm run build'"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

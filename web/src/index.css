@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  background: #0c0a09; /* stone-950 */
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+}
+
+.fade-up {
+  animation: fadeUp 0.45s ease both;
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.card-hover {
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+.card-hover:hover {
+  transform: translateY(-2px);
+}
+input:focus,
+select:focus {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
