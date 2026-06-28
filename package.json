@@ -6,10 +6,10 @@
   "engines": { "node": ">=18" },
   "scripts": {
     "build": "cd web && npm install && npm run build",
-    "start": "node server/index.js",
-    "postinstall": "echo 'Kök bağımlılıkları kuruldu. Build için: npm run build'"
+    "start": "node server/index.js"
   },
   "dependencies": {
+    "@firstthumb/tefas-api": "latest",
     "express": "^4.19.2"
   }
 }
