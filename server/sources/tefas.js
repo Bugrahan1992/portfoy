@@ -1,90 +1,108 @@
-// TEFAS fon fiyatı.
-// NOT: TEFAS Nisan 2026'da altyapısını Next.js'e taşıdı ve eski
-// /api/DB/BindHistoryInfo uçlarını kaldırdı. Yeni uç:
-//   https://www.tefas.gov.tr/api/funds/fonGnlBlgSiraliGetir   (fiyat/pay/büyüklük)
-// TEFAS dakikada ~6 istek sınırı uygular; bu yüzden gün boyu önbelleğe alıyoruz.
+// TEFAS fon fiyatları — TÜM LİSTEYİ GÜNDE BİR ÇEKME yaklaşımı.
 //
-// Bu modül "en iyi çaba" mantığıyla çalışır: fiyatı bulursa döndürür,
-// bulamazsa { price: null } döner ve uygulama o kalemi elle bırakır.
-// Resmi uç gelecekte yine değişirse, alttaki FALLBACK (Fonoloji) notuna bak.
+// TEFAS'ın yeni resmi ucu tek istekte o günün tüm fon listesini (kod + fiyat) verir:
+//   https://www.tefas.gov.tr/api/funds/fonGnlBlgSiraliGetir
+// Bu yüzden fonları tek tek sormak yerine listeyi bir kez çekip 6 saat önbellekte
+// tutuyoruz; sonra her kodu bu listeden okuyoruz. Böylece TEFAS'ın dakikada ~6
+// istek sınırına da takılmıyoruz.
+//
+// NOT: Bu yeni ucun tam parametre adları resmi olarak belgelenmedi; aşağıda birkaç
+// olası biçim deneniyor. Yayına aldıktan sonra /api/tefas-list adresini açıp
+// "count" değerine bak: 0'dan büyükse liste geliyor demektir. 0 ise (uç yine
+// değişmiş olabilir) ilgili kalemleri elle güncellersin; kalıcı çözüm için
+// dosyanın altındaki FALLBACK (Fonoloji) notuna bak.
 import { getCached, setCached } from "../cache.js";
 
 const BASE = "https://www.tefas.gov.tr/api/funds/fonGnlBlgSiraliGetir";
-const TTL = 1000 * 60 * 60 * 6; // 6 saat (fiyatlar günde bir güncellenir)
+const LIST_TTL = 1000 * 60 * 60 * 6; // 6 saat
 
 function toNum(v) {
   if (typeof v === "number") return isFinite(v) ? v : null;
   if (typeof v !== "string") return null;
   let s = v.trim().replace(/[^\d.,-]/g, "");
-  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  if (s.includes(".") && s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (s.includes(",")) s = s.replace(",", ".");
   const n = parseFloat(s);
   return isFinite(n) ? n : null;
 }
-
-// Gelen kayıttan fiyat alanını esnek biçimde bulur (FIYAT / price / SONFIYAT ...).
+function readCode(row) {
+  for (const k of ["FONKODU", "fonKodu", "fonkodu", "code", "kod", "FonKodu"]) {
+    if (row[k]) return String(row[k]).toUpperCase().trim();
+  }
+  return "";
+}
 function readPrice(row) {
-  if (!row || typeof row !== "object") return null;
-  for (const k of Object.keys(row)) {
-    if (/^(fiyat|price|sonfiyat|birimpayde[gğ]eri)$/i.test(k)) {
-      const n = toNum(row[k]);
-      if (n != null) return n;
-    }
+  for (const k of ["FIYAT", "fiyat", "price", "SONFIYAT", "birimPayDegeri", "BIRIMPAYDEGERI"]) {
+    if (row[k] != null) { const n = toNum(row[k]); if (n != null) return n; }
   }
   return null;
+}
+function ddmmyyyy(d) { const p = (n) => String(n).padStart(2, "0"); return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`; }
+
+async function fetchListForDate(dateStr) {
+  const headers = {
+    "User-Agent": "Mozilla/5.0",
+    Accept: "application/json, text/plain, */*",
+    Referer: "https://www.tefas.gov.tr/",
+    "X-Requested-With": "XMLHttpRequest",
+  };
+  const tries = [
+    { url: `${BASE}?fontip=YAT&tarih=${dateStr}`, opt: { headers } },
+    { url: `${BASE}?fontip=YAT&bastarih=${dateStr}&bittarih=${dateStr}`, opt: { headers } },
+    { url: BASE, opt: { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ fontip: "YAT", tarih: dateStr }) } },
+    { url: BASE, opt: { method: "POST", headers: { ...headers, "Content-Type": "application/x-www-form-urlencoded" }, body: `fontip=YAT&tarih=${dateStr}` } },
+  ];
+  for (const t of tries) {
+    try {
+      const r = await fetch(t.url, t.opt);
+      if (!r.ok) continue;
+      const data = await r.json();
+      const arr = Array.isArray(data) ? data : data.data || data.fonlar || data.result || [];
+      if (Array.isArray(arr) && arr.length) return arr;
+    } catch (e) { /* sıradaki biçimi dene */ }
+  }
+  return null;
+}
+
+// Tüm fon listesini (kod -> fiyat) getirir, önbelleğe alır.
+export async function getFundList() {
+  const cached = getCached("tefas:list");
+  if (cached) return cached;
+
+  let arr = null;
+  // Bugün veri yoksa (akşam yayınlanır) birkaç gün geriye dön
+  for (let i = 0; i < 5 && !arr; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    arr = await fetchListForDate(ddmmyyyy(d));
+  }
+
+  const map = {};
+  if (arr) {
+    for (const row of arr) {
+      const code = readCode(row);
+      const price = readPrice(row);
+      if (code && price != null) map[code] = price;
+    }
+  }
+  const out = { map, date: new Date().toISOString().slice(0, 10), count: Object.keys(map).length };
+  if (out.count > 0) setCached("tefas:list", out, LIST_TTL);
+  return out;
 }
 
 export async function getFundPrice(code) {
   code = (code || "").toUpperCase().trim();
   if (!code) return { code, price: null, error: "no_code" };
-
-  const cacheKey = "tefas:" + code;
-  const cached = getCached(cacheKey);
-  if (cached) return cached;
-
-  const headers = {
-    "User-Agent": "Mozilla/5.0",
-    Accept: "application/json, text/plain, */*",
-    Referer: "https://www.tefas.gov.tr/FonAnaliz.aspx",
-    "X-Requested-With": "XMLHttpRequest",
-  };
-
-  // Yeni uç farklı parametre adları kabul edebildiği için birkaç olasılığı deniyoruz.
-  const attempts = [
-    `${BASE}?fonkod=${code}`,
-    `${BASE}?fonKod=${code}`,
-    `${BASE}?fontip=YAT&fonkod=${code}`,
-    `${BASE}?kind=YAT&fundCode=${code}`,
-  ];
-
-  let price = null;
-  for (const url of attempts) {
-    try {
-      const r = await fetch(url, { headers });
-      if (!r.ok) continue;
-      const data = await r.json();
-      const list = Array.isArray(data) ? data : data.data || data.fonlar || data.result || [];
-      const row =
-        (Array.isArray(list) ? list : []).find(
-          (x) => (x.FONKODU || x.fonKodu || x.code || x.kod || "").toUpperCase() === code
-        ) || (Array.isArray(list) ? list[0] : null);
-      price = readPrice(row);
-      if (price != null) break;
-    } catch (e) {
-      // sıradaki denemeye geç
-    }
-  }
-
-  const out = { code, price, date: new Date().toISOString().slice(0, 10), source: "tefas" };
-  if (price != null) setCached(cacheKey, out, TTL);
-  else out.error = "not_found";
-  return out;
+  const list = await getFundList();
+  if (list.map[code] != null) return { code, price: list.map[code], source: "tefas", date: list.date };
+  return { code, price: null, error: list.count ? "not_in_list" : "list_empty" };
 }
 
 /*
-  FALLBACK — eğer resmi uç çalışmazsa (boş/410 dönerse):
+  FALLBACK — resmi uç boş dönerse (/api/tefas-list count: 0):
   Fonoloji ücretsiz JSON API'sine geçebilirsin (kişisel kullanım için yeterli):
     1) fonoloji.com/api-docs adresinden ücretsiz anahtar al.
-    2) Bu fonksiyonu kullan:
+    2) getFundPrice'ı şu şekilde değiştir:
 
   export async function getFundPrice(code) {
     const key = process.env.FONOLOJI_KEY;

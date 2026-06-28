@@ -1,71 +1,79 @@
 // Piyasa verileri (USD, EUR, gram altın, BIST100).
-// Kaynak: Truncgil Finans — API anahtarı/kayıt gerektirmez, JSON döner.
-// Sunucu tarafından çekildiği için CORS sorunu yoktur.
+// BİRİNCİL KAYNAK: GenelPara — GERÇEK ZAMANLI, API anahtarı/kayıt gerektirmez, JSON.
+//   https://api.genelpara.com/json/?list=doviz&sembol=USD,EUR
+//   https://api.genelpara.com/json/?list=altin&sembol=GA   (GA = gram altın)
+// Sunucu tarafından çekilir → tarayıcıda CORS sorunu olmaz.
+// YEDEK: GenelPara cevap vermezse Truncgil denenir.
 import { getCached, setCached } from "../cache.js";
 
-const URL_V3 = "https://finans.truncgil.com/v3/today.json";
-const TTL = 1000 * 60 * 15; // 15 dk
+const TTL = 1000 * 60 * 3; // 3 dk önbellek (gerçek zamanlıya yakın, ama kaynağı yormadan)
 
-// "1.234,56" gibi TR formatlı string'i veya sayıyı number'a çevirir.
-function toNum(v) {
+function num(v) {
   if (typeof v === "number") return isFinite(v) ? v : null;
   if (typeof v !== "string") return null;
   let s = v.trim().replace(/[^\d.,-]/g, "");
-  // TR formatı: nokta binlik, virgül ondalık
-  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
-  const n = parseFloat(s);
+  if (s.includes(".") && s.includes(",")) s = s.replace(/\./g, "").replace(",", "."); // 1.234,56
+  else if (s.includes(",")) s = s.replace(",", "."); // 14,23
+  const n = parseFloat(s); // 43.5028 gibi nokta-ondalık zaten doğru
   return isFinite(n) ? n : null;
 }
-
-// Bir alanın değeri sayı/string ya da {Selling/Satış/Buying/Alış} objesi olabilir.
-function readVal(node) {
+function satis(node) {
   if (node == null) return null;
-  if (typeof node === "number" || typeof node === "string") return toNum(node);
-  if (typeof node === "object") {
-    const cand =
-      node.Selling ?? node["Satış"] ?? node.satis ?? node.selling ??
-      node.Buying ?? node["Alış"] ?? node.alis ?? node.Value ?? node.value;
-    if (cand != null) return toNum(cand);
-    const first = Object.values(node).find((x) => typeof x === "number" || typeof x === "string");
-    return first != null ? toNum(first) : null;
-  }
-  return null;
+  if (typeof node === "object") return num(node.satis ?? node.alis ?? node.fiyat ?? node.last);
+  return num(node);
 }
 
-// Anahtar isimleri sürümle değişebildiği için tolere ederek arıyoruz.
-function pick(obj, regexes) {
-  for (const k of Object.keys(obj)) {
-    if (regexes.some((r) => r.test(k))) return obj[k];
-  }
-  return null;
+async function gp(list, sembol) {
+  const url = `https://api.genelpara.com/json/?list=${list}&sembol=${sembol}`;
+  const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" } });
+  if (!r.ok) throw new Error("genelpara_" + r.status);
+  const j = await r.json();
+  return j && j.data ? j.data : j; // bazı sürümlerde { data: {...} } sarmalı var
+}
+
+// Yedek kaynak: Truncgil (saatlik)
+async function truncgil() {
+  const r = await fetch("https://finans.truncgil.com/v3/today.json", { headers: { "User-Agent": "Mozilla/5.0" } });
+  if (!r.ok) throw new Error("truncgil_" + r.status);
+  const d = await r.json();
+  const pick = (regexes) => { for (const k of Object.keys(d)) if (regexes.some((re) => re.test(k))) return d[k]; return null; };
+  return {
+    usd: satis(pick([/^usd$/i, /dolar/i])),
+    eur: satis(pick([/^eur$/i, /euro/i])),
+    gramAltin: satis(pick([/gram.?alt/i, /^gra$/i])),
+    bist100: satis(pick([/bist.?100/i, /xu100/i])),
+  };
 }
 
 export async function getMarket() {
   const cached = getCached("market");
   if (cached) return cached;
 
-  const r = await fetch(URL_V3, {
-    headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-  });
-  if (!r.ok) throw new Error("truncgil_http_" + r.status);
-  const data = await r.json();
+  let usd = null, eur = null, gramAltin = null, bist100 = null, source = "genelpara";
 
-  const out = {
-    usd: readVal(pick(data, [/^usd$/i, /dolar/i])),
-    eur: readVal(pick(data, [/^eur$/i, /euro/i])),
-    gramAltin: readVal(pick(data, [/gram.?alt/i, /^gra$/i, /gram-altin/i])),
-    bist100: readVal(pick(data, [/bist.?100/i, /xu100/i, /borsa.?istanbul/i])),
-    updatedAt: data["Update_Date"] || data["Güncelleme Tarihi"] || new Date().toISOString(),
-    source: "truncgil",
-  };
+  try { const d = await gp("doviz", "USD,EUR"); usd = satis(d.USD); eur = satis(d.EUR); } catch (e) {}
+  try { const a = await gp("altin", "GA"); gramAltin = satis(a.GA); } catch (e) {}
+  try { const b = await gp("borsa", "XU100"); bist100 = satis(b.XU100 ?? b["XU100"]); } catch (e) {}
 
+  // GenelPara'dan kritik alanlar gelmediyse Truncgil ile tamamla
+  if (usd == null || gramAltin == null) {
+    try {
+      const t = await truncgil();
+      if (usd == null) usd = t.usd;
+      if (eur == null) eur = t.eur;
+      if (gramAltin == null) gramAltin = t.gramAltin;
+      if (bist100 == null) bist100 = t.bist100;
+      source = usd != null && source === "genelpara" ? "genelpara+truncgil" : "truncgil";
+    } catch (e) {}
+  }
+
+  const out = { usd, eur, gramAltin, bist100, updatedAt: new Date().toISOString(), source };
   setCached("market", out, TTL);
   return out;
 }
 
-// Hata ayıklama: kaynaktan gelen ham JSON'u olduğu gibi döndürür.
-// Alan adları beklenenden farklıysa /api/market/raw ile görüp parser'ı düzeltebilirsin.
+// Hata ayıklama: GenelPara ham döviz cevabını gösterir.
 export async function getMarketRaw() {
-  const r = await fetch(URL_V3, { headers: { "User-Agent": "Mozilla/5.0" } });
+  const r = await fetch("https://api.genelpara.com/json/?list=doviz&sembol=USD,EUR", { headers: { "User-Agent": "Mozilla/5.0" } });
   return r.json();
 }
