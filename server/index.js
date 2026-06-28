@@ -2,7 +2,7 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getMarket, getMarketRaw } from "./sources/market.js";
-import { getFundPrice, getFundList } from "./sources/tefas.js";
+import { getFundPrice, getSample } from "./sources/tefas.js";
 import { getCds } from "./sources/cds.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -27,15 +27,16 @@ app.get("/api/market/raw", async (req, res) => {
   catch (e) { res.status(502).json({ error: "raw_unavailable" }); }
 });
 
-// TEFAS fon fiyatı (önbellekli tüm listeden): /api/tefas/AFA
+// TEFAS fon fiyatı: /api/tefas/AFA
 app.get("/api/tefas/:code", async (req, res) => {
   try { res.json(await getFundPrice(req.params.code)); }
   catch (e) { res.json({ code: req.params.code, price: null, error: "fetch_failed" }); }
 });
 
-// TEFAS liste kontrolü: kaç fon çekildi? (count > 0 ise çalışıyor demektir)
+// TEFAS sağlık kontrolü: örnek fonun fiyatı geliyor mu?
+// İstersen ?code=AFA ile kendi fonunu test et.
 app.get("/api/tefas-list", async (req, res) => {
-  try { const l = await getFundList(); res.json({ count: l.count, date: l.date, sample: Object.keys(l.map).slice(0, 8) }); }
+  try { res.json(await getSample(req.query.code ? String(req.query.code) : "IPB")); }
   catch (e) { res.status(502).json({ error: "list_failed", detail: String(e.message || e) }); }
 });
 
