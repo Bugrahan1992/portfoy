@@ -2,7 +2,7 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getMarket, getMarketRaw } from "./sources/market.js";
-import { getFundPrice } from "./sources/tefas.js";
+import { getFundPrice, getFundList } from "./sources/tefas.js";
 import { getCds } from "./sources/cds.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -21,16 +21,22 @@ app.get("/api/market", async (req, res) => {
   }
 });
 
-// Ham kaynak (alan adları değişirse parser'ı düzeltmek için)
+// Ham döviz cevabı (alan adları değişirse kontrol için)
 app.get("/api/market/raw", async (req, res) => {
   try { res.json(await getMarketRaw()); }
   catch (e) { res.status(502).json({ error: "raw_unavailable" }); }
 });
 
-// TEFAS fon fiyatı: /api/tefas/AFA
+// TEFAS fon fiyatı (önbellekli tüm listeden): /api/tefas/AFA
 app.get("/api/tefas/:code", async (req, res) => {
   try { res.json(await getFundPrice(req.params.code)); }
   catch (e) { res.json({ code: req.params.code, price: null, error: "fetch_failed" }); }
+});
+
+// TEFAS liste kontrolü: kaç fon çekildi? (count > 0 ise çalışıyor demektir)
+app.get("/api/tefas-list", async (req, res) => {
+  try { const l = await getFundList(); res.json({ count: l.count, date: l.date, sample: Object.keys(l.map).slice(0, 8) }); }
+  catch (e) { res.status(502).json({ error: "list_failed", detail: String(e.message || e) }); }
 });
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
